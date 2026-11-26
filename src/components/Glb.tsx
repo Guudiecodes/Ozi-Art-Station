@@ -1,59 +1,60 @@
 "use client";
 import { useFrame } from "@react-three/fiber";
 import { useGLTF } from "@react-three/drei";
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import * as THREE from "three";
+import { clone } from "three/examples/jsm/utils/SkeletonUtils.js";
 
 export type Mode = "original" | "clay" | "chrome";
-export type Stats = { tris: number; size: [number, number, number] };
+const bounce = (t: number) => { // ease-out bounce: the model drops in and settles
+  const n = 7.5625, d = 2.75;
+  if (t < 1 / d) return n * t * t; if (t < 2 / d) return n * (t -= 1.5 / d) * t + 0.75;
+  if (t < 2.5 / d) return n * (t -= 2.25 / d) * t + 0.9375; return n * (t -= 2.625 / d) * t + 0.984375;
+};
+const mats = (m: THREE.Material | THREE.Material[]) => (Array.isArray(m) ? m : [m]);
 
-// Loads a GLB, centres and normalises it to a 2-unit box, and drops it in with a bounce once it has finished loading.
-export default function Glb({ url, mode = "original", wire = false, onReady, onStats, onPick }: {
-  url: string; mode?: Mode; wire?: boolean; onReady?: () => void; onStats?: (s: Stats) => void; onPick?: (p: THREE.Vector3) => void;
+// Loads a GLB, centres it, scales it to a standard size, and (optionally) drops it in.
+// Rendered inside <Suspense>, so it mounts only after the file has finished loading.
+export default function Glb({ url, onReady, onFit, onStats, onPoint, mode = "original", wire = false, drop = true }: {
+  url: string; onReady?: () => void; onFit?: (height: number) => void; onStats?: (s: { tris: number }) => void;
+  onPoint?: (p: THREE.Vector3) => void; mode?: Mode; wire?: boolean; drop?: boolean;
 }) {
   const { scene } = useGLTF(url);
-  const obj = useMemo(() => {
-    const c = scene.clone(true);
-    c.traverse((o) => { const m = o as THREE.Mesh; if (m.isMesh) m.userData.orig = m.material; });
-    return c;
-  }, [scene]);
-  const fit = useMemo(() => {
-    const b = new THREE.Box3().setFromObject(obj), size = b.getSize(new THREE.Vector3()), c = b.getCenter(new THREE.Vector3());
-    const s = 2 / Math.max(size.x, size.y, size.z, 1e-6);
-    return { s, off: c.multiplyScalar(-s).toArray() as [number, number, number], size: size.toArray() as [number, number, number] };
-  }, [obj]);
-  useEffect(() => {
-    let tris = 0;
-    obj.traverse((o) => { const m = o as THREE.Mesh; if (m.isMesh) tris += (m.geometry.index ? m.geometry.index.count : m.geometry.attributes.position.count) / 3; });
-    onStats?.({ tris: Math.round(tris), size: fit.size }); onReady?.();
-  }, [obj, fit, onStats, onReady]);
-  useEffect(() => {
-    const made: THREE.Material[] = [];
-    obj.traverse((o) => {
-      const m = o as THREE.Mesh; if (!m.isMesh) return;
-      const orig = m.userData.orig as THREE.Material | THREE.Material[];
-      const mk = (x: THREE.Material) => {
-        let n: THREE.Material;
-        if (mode === "clay") n = new THREE.MeshStandardMaterial({ color: "#e8e8e8", roughness: 0.85 });
-        else if (mode === "chrome") n = new THREE.MeshStandardMaterial({ color: "#ffffff", metalness: 1, roughness: 0.04 });
-        else n = x.clone();
-        (n as THREE.MeshStandardMaterial).wireframe = wire; made.push(n); return n;
-      };
-      m.material = Array.isArray(orig) ? orig.map(mk) : mk(orig);
+  const group = useRef<THREE.Group>(null!), t0 = useRef<number | null>(null);
+  const clay = useMemo(() => new THREE.MeshStandardMaterial({ color: "#d8d8d8", roughness: 0.85, metalness: 0 }), []);
+  const chrome = useMemo(() => new THREE.MeshStandardMaterial({ color: "#ffffff", roughness: 0.04, metalness: 1 }), []);
+  const m = useMemo(() => {
+    const c = clone(scene) as THREE.Group; let tris = 0;
+    c.traverse((o) => {
+      const me = o as THREE.Mesh; if (!me.isMesh) return;
+      me.material = Array.isArray(me.material) ? me.material.map((x) => x.clone()) : me.material.clone();
+      me.userData.orig = me.material; me.castShadow = true;
+      const g = me.geometry; tris += (g.index ? g.index.count : g.getAttribute("position").count) / 3;
     });
-    return () => made.forEach((x) => x.dispose());
-  }, [obj, mode, wire]);
-  const g = useRef<THREE.Group>(null!), t = useRef(0);
-  useFrame((_, dt) => {
-    t.current = Math.min(t.current + dt / 1.1, 1);
-    const x = t.current - 1, e = 1 + 2.70158 * x ** 3 + 1.70158 * x ** 2; // easeOutBack
-    g.current.position.y = (1 - e) * 3.2; g.current.scale.setScalar(0.55 + 0.45 * Math.min(e, 1.05));
+    c.updateWorldMatrix(true, true);
+    const box = new THREE.Box3().setFromObject(c, true), size = box.getSize(new THREE.Vector3()), ctr = box.getCenter(new THREE.Vector3());
+    const s = 1.8 / (Math.max(size.x, size.y, size.z) || 1);
+    return { c, s, ctr, tris: Math.round(tris), h: size.y * s };
+  }, [scene]);
+  useLayoutEffect(() => {
+    m.c.traverse((o) => {
+      const me = o as THREE.Mesh; if (!me.isMesh) return;
+      const orig = me.userData.orig as THREE.Material | THREE.Material[];
+      me.material = mode === "clay" ? clay : mode === "chrome" ? chrome : orig;
+      for (const x of [...mats(orig), clay, chrome]) (x as THREE.MeshStandardMaterial).wireframe = wire;
+    });
+  }, [m, mode, wire, clay, chrome]);
+  useEffect(() => { onReady?.(); onFit?.(m.h); onStats?.({ tris: m.tris }); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [m]);
+  useEffect(() => () => { m.c.traverse((o) => { const me = o as THREE.Mesh; if (me.isMesh) mats(me.userData.orig).forEach((x: THREE.Material) => x.dispose()); }); }, [m]);
+  useFrame((s) => {
+    if (!drop) return; if (t0.current === null) t0.current = s.clock.elapsedTime;
+    const t = Math.min(1, (s.clock.elapsedTime - t0.current) / 0.9);
+    group.current.position.y = (1 - bounce(t)) * 1.5;
   });
   return (
-    <group ref={g}>
-      <group position={fit.off} scale={fit.s}
-        onDoubleClick={onPick ? (e) => { e.stopPropagation(); onPick(e.point.clone().sub(new THREE.Vector3(...fit.off)).divideScalar(fit.s)); } : undefined}>
-        <primitive object={obj} />
+    <group ref={group} position={[0, drop ? 1.5 : 0, 0]}>
+      <group scale={m.s}>
+        <primitive object={m.c} position={[-m.ctr.x, -m.ctr.y, -m.ctr.z]} onDoubleClick={onPoint ? (e: { stopPropagation: () => void; point: THREE.Vector3 }) => { e.stopPropagation(); onPoint(e.point); } : undefined} />
       </group>
     </group>
   );

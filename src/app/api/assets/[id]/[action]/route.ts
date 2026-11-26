@@ -1,36 +1,62 @@
+import crypto from "crypto";
+import fs from "fs";
+import path from "path";
 import { NextResponse } from "next/server";
-import { canEdit, currentUser } from "@/lib/auth";
-import { addAnnotation, addComment, bump, deleteComment, getAsset, getComment, toggleLike } from "@/lib/db";
+import { VID, currentUser, ipOf, visitorId } from "@/lib/auth";
+import { addAnnotation, bump, getAsset, log, removeAnnotation, toggleLike, updateAsset } from "@/lib/db";
+import { fileName, fileResponse, locate, modelPreview, put, texturePreview } from "@/lib/storage";
 
 const err = (m: string, s: number) => NextResponse.json({ error: m }, { status: s });
 type P = { params: Promise<{ id: string; action: string }> };
+const seen = new Map<string, number>();
+
 export async function GET(req: Request, { params }: P) {
   const { id, action } = await params;
   if (action !== "download") return err("Not found", 404);
-  const a = bump(id, "downloads"); if (!a) return err("Not found", 404);
-  return NextResponse.redirect(new URL(a.file, req.url));
+  const a = getAsset(id), owner = await currentUser();
+  if (!a || (a.status !== "published" && !owner)) return err("Not found", 404);
+  if (a.price > 0 && !owner) return NextResponse.redirect(new URL(`/a/${a.slug}?buy=1`, req.url));
+  bump(a.id, "downloads");
+  const abs = locate(a.file);
+  if (!abs) return NextResponse.redirect(new URL(a.file, req.url)); // bundled sample in /public
+  return fileResponse(abs, `${a.slug}${path.extname(abs)}`);
 }
 export async function POST(req: Request, { params }: P) {
   const { id, action } = await params, a = getAsset(id); if (!a) return err("Not found", 404);
-  if (action === "view") { bump(id, "views"); return NextResponse.json({ ok: true }); }
-  const u = await currentUser(); if (!u) return err("Log in first.", 401);
-  const b = await req.json().catch(() => ({}));
-  if (action === "like") return NextResponse.json(toggleLike(id, u.id));
-  if (action === "comments") {
-    const text = String(b.text || "").trim().slice(0, 500); if (!text) return err("Write a comment first.", 400);
-    return NextResponse.json(addComment(a.id, u.id, text), { status: 201 });
+  const owner = await currentUser();
+  if (a.status !== "published" && !owner) return err("Not found", 404);
+  if (action === "view") {
+    const k = `${(await visitorId()) || ipOf(req)}:${a.id}`, now = Date.now();
+    if (now - (seen.get(k) ?? 0) > 30 * 60e3) { seen.set(k, now); bump(a.id, "views"); if (seen.size > 5000) seen.clear(); }
+    return NextResponse.json({ ok: true });
   }
+  if (action === "like") {
+    const vid = (await visitorId()) || crypto.randomBytes(9).toString("hex");
+    const res = NextResponse.json(toggleLike(a.id, vid));
+    res.cookies.set(VID, vid, { httpOnly: true, sameSite: "lax", path: "/", maxAge: 365 * 86400 }); return res;
+  }
+  if (!owner) return err("Only the owner can do this.", 401);
+  const b = await req.json().catch(() => ({}));
   if (action === "annotations") {
-    if (!canEdit(u, a.ownerId)) return err("Only the owner can add pins.", 403);
     const pos = Array.isArray(b.pos) && b.pos.length === 3 && b.pos.every((n: unknown) => typeof n === "number") ? b.pos : null, text = String(b.text || "").trim().slice(0, 200);
     if (!pos || !text) return err("Pin needs a position and text.", 400);
     return NextResponse.json(addAnnotation(a.id, { id: Math.random().toString(36).slice(2, 9), pos, text }), { status: 201 });
   }
+  if (action === "preview") { // rebuild the public low-res copy from the private original
+    const abs = locate(a.file); if (!abs || !a.file.startsWith("private:")) return err("This asset has no private original.", 400);
+    try {
+      const src = fs.readFileSync(abs), ext = path.extname(abs).toLowerCase();
+      if (a.type === "hdri") return err("HDRIs have no automatic preview. Upload a smaller .hdr as the preview instead.", 400);
+      const out = a.type === "model" ? await modelPreview(src) : await texturePreview(src);
+      const old = a.preview; const ref = put("public", fileName(a.type === "model" ? ".glb" : ".jpg", "p-"), out);
+      updateAsset(a.id, { preview: ref, protectedPreview: true }); if (old.startsWith("/api/files/") && old !== a.file) fs.rmSync(locate(old)!, { force: true });
+      log("edit", `Rebuilt preview for ${a.title}`); void ext; return NextResponse.json({ ok: true, size: out.length });
+    } catch { return err("Could not build a preview from this file.", 422); }
+  }
   return err("Not found", 404);
 }
 export async function DELETE(req: Request, { params }: P) {
-  const { action } = await params; if (action !== "comments") return err("Not found", 404);
-  const u = await currentUser(), c = getComment(new URL(req.url).searchParams.get("c") || "");
-  if (!c) return err("Not found", 404); if (!canEdit(u, c.userId)) return err("Not allowed.", 403);
-  deleteComment(c.id); return NextResponse.json({ ok: true });
+  const { id, action } = await params; if (action !== "annotations") return err("Not found", 404);
+  if (!(await currentUser())) return err("Only the owner can do this.", 401);
+  const n = new URL(req.url).searchParams.get("n") || ""; return removeAnnotation(id, n) ? NextResponse.json({ ok: true }) : err("Not found", 404);
 }
