@@ -52,7 +52,7 @@ export class Puppet {
   private hips?: Bone; private belly?: Bone; private kid?: Bone; private chest?: Bone; private head?: Bone; private neck?: Bone;
   private restB = new V(1, 1, 1); private restK = new V(1, 1, 1);
   private s = { b: [0, 0] as Spring, st: [0, 0] as Spring, rx: [0, 0] as Spring, rz: [0, 0] as Spring, hx: [0, 0] as Spring, hy: [0, 0] as Spring };
-  private tg = { b: 0, st: 0, rx: 0, rz: 0 };
+  tg = { b: 0, st: 0, rx: 0, rz: 0 };
   private giggle = 0; private next = 1.4; private gest: { name: "wave" | "stretch" | "cheer"; end: number; limbs: LimbKey[]; phase: number } | null = null;
 
   constructor(private model: Bone) {
@@ -69,11 +69,11 @@ export class Puppet {
   get dragging() { return !!this.drag; }
 
   // ---- picking: the pointer ray against capsules drawn along the bones, so it does not depend on the mesh
-  hit(ray: THREE.Ray): Hit | null {
+  hit(ray: THREE.Ray, slop = 1): Hit | null { // slop makes the grab areas bigger (move and turn modes accept a touch anywhere on the body)
     this.model.updateMatrixWorld(true);
     const H = this.H, p = (o: Bone) => o.getWorldPosition(new V());
     let best: Hit | null = null, bestR = 1;
-    const test = (a: THREE.Vector3, b: THREE.Vector3, r: number, h: Hit) => { const { dist } = raySeg(ray, a, b), k = dist / (r * H); if (k < bestR) { bestR = k; best = h; } };
+    const test = (a: THREE.Vector3, b: THREE.Vector3, r: number, h: Hit) => { const { dist } = raySeg(ray, a, b), k = dist / (r * H * slop); if (k < bestR) { bestR = k; best = h; } };
     for (const l of this.limbs) {
       const A = p(l.a), B = p(l.b), C = p(l.c), tip = l.tip ? p(l.tip) : C.clone().add(C.clone().sub(B).multiplyScalar(0.45));
       const r = l.arm ? 0.055 : 0.075, h: Hit = { kind: "limb", limb: l };
@@ -115,8 +115,10 @@ export class Puppet {
   }
 
   private lastT = 0;
-  private startGesture(t: number) {
-    const arms = this.limbs.filter((l) => l.arm).map((l) => l.key), n = Math.random(), phase = Math.random() * 6;
+  play(name: "wave" | "cheer" | "stretch", t = this.lastT) { this.drag = null; this.startGesture(t, name); }
+  reset() { this.drag = null; this.gest = null; this.next = this.lastT + 6; this.headLook.on = false; this.tg = { b: 0, st: 0, rx: 0, rz: 0 }; }
+  private startGesture(t: number, force?: "wave" | "cheer" | "stretch") {
+    const arms = this.limbs.filter((l) => l.arm).map((l) => l.key), n = force === "wave" ? 0 : force === "stretch" ? 0.6 : force === "cheer" ? 0.9 : Math.random(), phase = Math.random() * 6;
     if (!arms.length) { this.next = t + 8; return; }
     if (n < 0.45) this.gest = { name: "wave", end: t + 3, limbs: [arms[Math.random() < 0.5 ? 0 : arms.length - 1]], phase };
     else if (n < 0.75) this.gest = { name: "stretch", end: t + 2.6, limbs: arms, phase };

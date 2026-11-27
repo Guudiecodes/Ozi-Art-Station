@@ -1,17 +1,17 @@
 import { NextResponse } from "next/server";
 import { currentUser } from "@/lib/auth";
-import { adminSettings, getSettings, log, updateSettings, type Character } from "@/lib/db";
+import { adminSettings, getSettings, log, updateSettings, type Character, ready } from "@/lib/db";
 import { CURRENCIES } from "@/lib/lists";
 
 const str = (v: unknown, max: number) => String(v ?? "").trim().slice(0, max);
 const num = (v: unknown, lo: number, hi: number, d: number) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
 
-export async function GET() {
+export async function GET() { await ready();
   if (!(await currentUser())) return NextResponse.json({ error: "Owner only" }, { status: 401 });
   return NextResponse.json(adminSettings());
 }
 // Accepts only the fields below, so a request can never add arbitrary file paths or flags.
-export async function PATCH(req: Request) {
+export async function PATCH(req: Request) { await ready();
   if (!(await currentUser())) return NextResponse.json({ error: "Owner only" }, { status: 401 });
   const b = await req.json().catch(() => ({})), cur = getSettings(), p: any = {}, what: string[] = [];
   for (const [k, max] of [["siteName", 60], ["tagline", 120], ["heroTitle", 120], ["heroText", 300], ["supportEmail", 120], ["footerNote", 200]] as const) if (typeof b[k] === "string") { p[k] = str(b[k], max); what.push(k); }
@@ -20,6 +20,8 @@ export async function PATCH(req: Request) {
   if (b.maxDownloads !== undefined) p.maxDownloads = Math.round(num(b.maxDownloads, 1, 1000, cur.maxDownloads));
   if (typeof b.showSwitcher === "boolean") p.showSwitcher = b.showSwitcher;
   if (typeof b.autoSwitch === "boolean") p.autoSwitch = b.autoSwitch;
+  if (typeof b.showTools === "boolean") p.showTools = b.showTools;
+  if (["system", "light", "dark"].includes(b.defaultTheme)) p.defaultTheme = b.defaultTheme;
   if (b.switchSeconds !== undefined) p.switchSeconds = Math.round(num(b.switchSeconds, 4, 60, cur.switchSeconds));
   if (b.legal && typeof b.legal === "object") { p.legal = {}; for (const k of ["terms", "privacy", "refunds"]) if (typeof b.legal[k] === "string") p.legal[k] = String(b.legal[k]).slice(0, 20000); what.push("legal"); }
   if (Array.isArray(b.characters)) {

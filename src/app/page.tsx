@@ -2,10 +2,10 @@ import Link from "next/link";
 import Hero from "@/components/Hero";
 import Card from "@/components/Card";
 import { visitorId } from "@/lib/auth";
-import { listAssets, publicSettings, stats } from "@/lib/db";
+import { listAssets, publicSettings, stats, ready } from "@/lib/db";
 export const dynamic = "force-dynamic";
 
-export default async function Home() {
+export default async function Home() { await ready();
   const all = listAssets(await visitorId()), s = stats(), set = publicSettings();
   const picks = all.filter((a) => a.featured).slice(0, 4), latest = all.slice(0, 8);
   const n = (t: string) => all.filter((a) => a.type === t).length;
@@ -13,7 +13,7 @@ export default async function Home() {
   const sample = set.characters.map(({ id, name, file, scale, y, note }) => ({ id, name, file, scale, y, note }));
   return (<>
     <section className="hero">
-      <div className="heroCanvas"><Hero characters={sample} initial={set.heroCharacter} showSwitcher={set.showSwitcher} autoSwitch={set.autoSwitch} switchSeconds={set.switchSeconds} /></div>
+      <div className="heroCanvas"><Hero characters={sample} initial={set.heroCharacter} showSwitcher={set.showSwitcher} showTools={set.showTools} autoSwitch={set.autoSwitch} switchSeconds={set.switchSeconds} /></div>
       <div className="heroText">
         <h1>{set.heroTitle}</h1>
         <p>{set.heroText}</p>

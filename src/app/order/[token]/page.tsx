@@ -1,12 +1,12 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { OrderLive } from "@/components/AssetBits";
-import { getAsset, getSettings, orderByToken } from "@/lib/db";
+import { getAsset, getSettings, orderByToken, ready } from "@/lib/db";
 import { money } from "@/lib/lists";
 export const dynamic = "force-dynamic";
 export const metadata = { robots: { index: false } };
 
-export default async function OrderPage({ params }: { params: Promise<{ token: string }> }) {
+export default async function OrderPage({ params }: { params: Promise<{ token: string }> }) { await ready();
   const o = orderByToken((await params).token); if (!o) notFound();
   const s = getSettings(), a = getAsset(o.assetId), left = Math.max(0, s.maxDownloads - o.downloads);
   return (

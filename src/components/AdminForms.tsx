@@ -11,6 +11,19 @@ async function api(url: string, method: string, body?: unknown) {
 }
 function useMsg() { const [m, setM] = useState<{ t: string; bad?: boolean } | null>(null); return { m, ok: (t: string) => setM({ t }), no: (t: string) => setM({ t, bad: true }), el: m && <p className={m.bad ? "err" : "okmsg"} role="status">{m.t}</p> }; }
 
+// Large files go straight from the browser to Cloudflare R2 when it is connected (Vercel cannot take big request bodies). Returns null when the normal form post should be used.
+async function directPut(file: File, kind: "original" | "preview" | "character"): Promise<{ ref: string } | { error: string } | null> {
+  const ext = "." + (file.name.split(".").pop() || "").toLowerCase(), r = await api("/api/admin/upload/sign", "POST", { ext, kind });
+  if (!r.ok) return { error: r.j.error || "Could not start the upload." };
+  if (r.j.mode === "blob") {
+    try { const { upload } = await import("@vercel/blob/client"); await upload(r.j.pathname, file, { access: "private", handleUploadUrl: "/api/admin/upload/blob", multipart: file.size > 8 * 1024 * 1024, contentType: r.j.type }); return { ref: r.j.ref }; }
+    catch (e) { return { error: "The upload to file storage failed: " + ((e as Error).message || "unknown error") }; }
+  }
+  if (r.j.mode !== "direct") return null;
+  const put = await fetch(r.j.url, { method: "PUT", headers: { "Content-Type": r.j.type }, body: file }).catch(() => null);
+  if (!put || !put.ok) return { error: "The upload to file storage failed. Check the CORS setting on the R2 bucket (docs/VERCEL.md)." };
+  return { ref: r.j.ref };
+}
 const NAV: [string, string][] = [["/admin", "Overview"], ["/admin/assets", "Assets"], ["/admin/upload", "Upload"], ["/admin/orders", "Orders"], ["/admin/payments", "Payments"], ["/admin/hero", "Home page"], ["/admin/legal", "Legal pages"], ["/admin/settings", "Settings"]];
 export function AdminNav() {
   const p = usePathname();
@@ -44,7 +57,17 @@ export function UploadForm({ currency }: { currency: string }) {
   const r = useRouter(), msg = useMsg(), [busy, setBusy] = useState(false);
   const go = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault(); setBusy(true); msg.ok("Uploading. Large files can take a minute.");
-    const { ok, j } = await api("/api/admin/upload", "POST", new FormData(e.currentTarget));
+    const fd = new FormData(e.currentTarget), file = fd.get("file") as File, pf = fd.get("preview") as File | null;
+    const main = await directPut(file, "original");
+    if (main && "error" in main) { msg.no(main.error); setBusy(false); return; }
+    let out: { ok: boolean; j: { error?: string; warning?: string } };
+    if (main) {
+      let previewRef = "";
+      if (pf && pf.size) { const p = await directPut(pf, "preview"); if (p && "error" in p) { msg.no(p.error); setBusy(false); return; } if (p) previewRef = p.ref; }
+      const fields = Object.fromEntries([...fd.entries()].filter(([, v]) => typeof v === "string"));
+      out = await api("/api/admin/upload", "POST", { ...fields, fileRef: main.ref, fileName: file.name, previewRef });
+    } else out = await api("/api/admin/upload", "POST", fd);
+    const { ok, j } = out;
     if (ok) { if (j.warning) alert(j.warning); r.push(`/admin/assets`); r.refresh(); } else { msg.no(j.error || "Upload failed."); setBusy(false); }
   };
   return (
@@ -156,21 +179,27 @@ export function PaymentsForm({ p, origin }: { p: PS; origin?: string }) {
 }
 
 type Ch = { id: string; name: string; file: string; scale: number; y: number; enabled: boolean; builtin?: boolean };
-export function HeroForm({ s }: { s: { heroTitle: string; heroText: string; showSwitcher: boolean; autoSwitch: boolean; switchSeconds: number; heroCharacter: string; characters: Ch[] } }) {
+export function HeroForm({ s }: { s: { heroTitle: string; heroText: string; showSwitcher: boolean; showTools: boolean; autoSwitch: boolean; switchSeconds: number; heroCharacter: string; characters: Ch[] } }) {
   const r = useRouter(), msg = useMsg(), [chars, setChars] = useState(s.characters), [def, setDef] = useState(s.heroCharacter), [adding, setAdding] = useState(false);
   const set = (id: string, p: Partial<Ch>) => setChars((c) => c.map((x) => (x.id === id ? { ...x, ...p } : x)));
   const save = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault(); const f = new FormData(e.currentTarget);
-    const { ok, j } = await api("/api/admin/settings", "PATCH", { heroTitle: f.get("heroTitle"), heroText: f.get("heroText"), showSwitcher: f.get("sw") === "on", autoSwitch: f.get("auto") === "on", switchSeconds: f.get("secs"), heroCharacter: def, characters: chars });
+    const { ok, j } = await api("/api/admin/settings", "PATCH", { heroTitle: f.get("heroTitle"), heroText: f.get("heroText"), showSwitcher: f.get("sw") === "on", showTools: f.get("tools") === "on", autoSwitch: f.get("auto") === "on", switchSeconds: f.get("secs"), heroCharacter: def, characters: chars });
     ok ? (msg.ok("Saved."), r.refresh()) : msg.no(j.error || "Could not save.");
   };
-  const add = async (e: React.FormEvent<HTMLFormElement>) => { e.preventDefault(); setAdding(true); const { ok, j } = await api("/api/admin/characters", "POST", new FormData(e.currentTarget)); setAdding(false); ok ? r.refresh() : msg.no(j.error || "Upload failed."); if (ok) (e.target as HTMLFormElement).reset(); };
+  const add = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault(); setAdding(true); const form = e.currentTarget, fd = new FormData(form), file = fd.get("file") as File, main = await directPut(file, "character");
+    if (main && "error" in main) { setAdding(false); msg.no(main.error); return; }
+    const { ok, j } = main ? await api("/api/admin/characters", "POST", { ref: main.ref, name: fd.get("name") }) : await api("/api/admin/characters", "POST", fd);
+    setAdding(false); ok ? (r.refresh(), form.reset()) : msg.no(j.error || "Upload failed.");
+  };
   const rm = async (id: string) => { if (!confirm("Remove this character?")) return; const { ok, j } = await api(`/api/admin/characters?id=${id}`, "DELETE"); ok ? (setChars((c) => c.filter((x) => x.id !== id)), r.refresh()) : msg.no(j.error || "Failed."); };
   return (<>
     <form className="aform" onSubmit={save}>
       <label>Headline<input name="heroTitle" defaultValue={s.heroTitle} maxLength={120} /></label>
       <label>Text under the headline<textarea name="heroText" rows={3} defaultValue={s.heroText} maxLength={300} /></label>
       <label className="check"><input type="checkbox" name="sw" defaultChecked={s.showSwitcher} /> Let visitors switch characters</label>
+      <label className="check"><input type="checkbox" name="tools" defaultChecked={s.showTools} /> Show the character controls (move, turn, size, motions)</label>
       <div className="two"><label className="check"><input type="checkbox" name="auto" defaultChecked={s.autoSwitch} /> Switch characters automatically</label>
         <label>Seconds per character<input name="secs" type="number" min="4" max="60" defaultValue={s.switchSeconds} /></label></div>
       <p className="hint">When a visitor picks a character themselves, automatic switching stops for them. They can turn it back on with the Auto button.</p>
@@ -194,11 +223,11 @@ export function HeroForm({ s }: { s: { heroTitle: string; heroText: string; show
   </>);
 }
 
-export function SettingsForm({ s }: { s: { siteName: string; tagline: string; supportEmail: string; siteUrl: string; currency: string; maxDownloads: number; footerNote: string; email: { from: string; resendKey: Sec } } }) {
+export function SettingsForm({ s }: { s: { defaultTheme: string; siteName: string; tagline: string; supportEmail: string; siteUrl: string; currency: string; maxDownloads: number; footerNote: string; email: { from: string; resendKey: Sec } } }) {
   const r = useRouter(), msg = useMsg(), pw = useMsg();
   const save = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault(); const f = new FormData(e.currentTarget), g = (k: string) => String(f.get(k) || "");
-    const { ok, j } = await api("/api/admin/settings", "PATCH", { siteName: g("siteName"), tagline: g("tagline"), supportEmail: g("supportEmail"), siteUrl: g("siteUrl"), currency: g("currency"), maxDownloads: g("maxDownloads"), footerNote: g("footerNote"), email: { from: g("from"), resendKey: g("resendKey") } });
+    const { ok, j } = await api("/api/admin/settings", "PATCH", { defaultTheme: g("defaultTheme"), siteName: g("siteName"), tagline: g("tagline"), supportEmail: g("supportEmail"), siteUrl: g("siteUrl"), currency: g("currency"), maxDownloads: g("maxDownloads"), footerNote: g("footerNote"), email: { from: g("from"), resendKey: g("resendKey") } });
     ok ? (msg.ok("Saved."), r.refresh()) : msg.no(j.error || "Could not save.");
   };
   const change = async (e: React.FormEvent<HTMLFormElement>) => {
@@ -213,6 +242,7 @@ export function SettingsForm({ s }: { s: { siteName: string; tagline: string; su
       <label>Support email<input name="supportEmail" type="email" defaultValue={s.supportEmail} /></label>
       <div className="two"><label>Default currency<select name="currency" defaultValue={s.currency}>{CURRENCIES.map((c) => <option key={c}>{c}</option>)}</select></label>
         <label>Downloads allowed per purchase<input name="maxDownloads" type="number" min="1" max="1000" defaultValue={s.maxDownloads} /></label></div>
+      <label>Default look for new visitors<select name="defaultTheme" defaultValue={s.defaultTheme}><option value="system">Match their device</option><option value="light">Light</option><option value="dark">Dark</option></select><span className="hint">Visitors can change it with the sun and moon button in the header.</span></label>
       <label>Footer note<input name="footerNote" defaultValue={s.footerNote} maxLength={200} /></label>
       <div className="card2"><h3>Purchase emails (optional)</h3><p className="mutedp">With a Resend key, buyers get their download link by email. Without one, they still get it on the order page.</p>
         <label>From address<input name="from" defaultValue={s.email.from} placeholder="Shop <orders@yourdomain.com>" /></label>

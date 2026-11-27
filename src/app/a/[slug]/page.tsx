@@ -4,13 +4,13 @@ import AssetViewer from "@/components/AssetViewer";
 import Card from "@/components/Card";
 import { BuyBox, LikeShare, ViewPing } from "@/components/AssetBits";
 import { currentUser, visitorId } from "@/lib/auth";
-import { getAsset, listAssets, publicAsset, publicSettings } from "@/lib/db";
+import { getAsset, listAssets, publicAsset, publicSettings, ready } from "@/lib/db";
 import { money } from "@/lib/lists";
 export const dynamic = "force-dynamic";
 
 const KIND = { model: "3D model", hdri: "HDRI", texture: "Texture" };
-export async function generateMetadata({ params }: { params: Promise<{ slug: string }> }) { const a = publicAsset((await params).slug); return a ? { title: a.title, description: a.blurb || `${a.title}, a ${KIND[a.type]} you can preview in 3D.`, openGraph: { title: a.title, description: a.blurb } } : { title: "Not found" }; }
-export default async function AssetPage({ params }: { params: Promise<{ slug: string }> }) {
+export async function generateMetadata({ params }: { params: Promise<{ slug: string }> }) { await ready(); const a = publicAsset((await params).slug); return a ? { title: a.title, description: a.blurb || `${a.title}, a ${KIND[a.type]} you can preview in 3D.`, openGraph: { title: a.title, description: a.blurb } } : { title: "Not found" }; }
+export default async function AssetPage({ params }: { params: Promise<{ slug: string }> }) { await ready();
   const { slug } = await params, owner = !!(await currentUser()), vid = await visitorId();
   const a = publicAsset(slug, vid, owner); if (!a) notFound();
   const set = publicSettings(), raw = getAsset(a.id)!;

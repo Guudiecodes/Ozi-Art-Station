@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { currentUser } from "@/lib/auth";
-import { CATEGORIES, LICENSES, deleteAsset, getAsset, log, updateAsset } from "@/lib/db";
+import { CATEGORIES, LICENSES, deleteAsset, getAsset, log, updateAsset, ready } from "@/lib/db";
 import { CURRENCIES } from "@/lib/lists";
+import { remove } from "@/lib/storage";
 
 async function guard(id: string) {
   const u = await currentUser(), a = getAsset(id);
@@ -9,7 +10,7 @@ async function guard(id: string) {
   if (!a) return { res: NextResponse.json({ error: "Not found" }, { status: 404 }) };
   return { a };
 }
-export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) { await ready();
   const g = await guard((await params).id); if (g.res) return g.res;
   const b = await req.json().catch(() => ({})), p: Parameters<typeof updateAsset>[1] = {}, a = g.a!;
   if (typeof b.title === "string" && b.title.trim()) p.title = b.title.trim().slice(0, 80);
@@ -26,7 +27,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   if (`${out.price} ${out.currency}` !== before) log("price", `${out.title}: ${before} to ${out.price} ${out.currency}`); else log("edit", `Edited ${out.title}`);
   return NextResponse.json({ slug: out.slug });
 }
-export async function DELETE(_: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function DELETE(_: Request, { params }: { params: Promise<{ id: string }> }) { await ready();
   const g = await guard((await params).id); if (g.res) return g.res;
-  deleteAsset(g.a!.id); log("delete", `Deleted ${g.a!.title}`); return NextResponse.json({ ok: true });
+  const a = g.a!; deleteAsset(a.id); await remove(a.file); if (a.preview !== a.file) await remove(a.preview); log("delete", `Deleted ${g.a!.title}`); return NextResponse.json({ ok: true });
 }

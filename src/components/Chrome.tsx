@@ -3,6 +3,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useState } from "react";
 import type { Me } from "@/lib/auth";
+import ThemeToggle from "./ThemeToggle";
 
 export function Header({ me, siteName }: { me: Me; siteName: string }) {
   const path = usePathname(), r = useRouter(), [q, setQ] = useState(""), [menu, setMenu] = useState(false);
@@ -18,6 +19,7 @@ export function Header({ me, siteName }: { me: Me; siteName: string }) {
         <input aria-label="Search" placeholder="Search models, HDRIs, textures" value={q} onChange={(e) => setQ(e.target.value)} />
       </form>
       <div className="acct">
+        <ThemeToggle />
         {me && (<>
           <Link href="/admin/upload" className={`btnline sm ${path === "/admin/upload" ? "cur" : ""}`}>Upload</Link>
           <Link href="/admin" className={`btn sm ${path === "/admin" ? "cur" : ""}`}>Admin</Link>

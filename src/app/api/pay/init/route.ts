@@ -1,11 +1,11 @@
 import { NextResponse } from "next/server";
 import { ipOf, limited } from "@/lib/auth";
-import { createOrder, getAsset, publicSettings, setOrder, type Gateway } from "@/lib/db";
+import { createOrder, getAsset, publicSettings, setOrder, type Gateway, ready } from "@/lib/db";
 import { baseUrl, initCheckout } from "@/lib/pay";
 
 const bad = (m: string, s = 400) => NextResponse.json({ error: m }, { status: s });
 // The price always comes from the server's own record of the asset, never from the browser.
-export async function POST(req: Request) {
+export async function POST(req: Request) { await ready();
   if (limited(`pay:${ipOf(req)}`, 12, 10 * 60e3)) return bad("Too many attempts. Try again in a few minutes.", 429);
   const b = await req.json().catch(() => ({})), a = getAsset(String(b.asset || "")), email = String(b.email || "").trim().toLowerCase();
   if (!a || a.status !== "published") return bad("Asset not found.", 404);

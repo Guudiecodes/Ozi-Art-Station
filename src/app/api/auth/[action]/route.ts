@@ -1,11 +1,12 @@
+import { SETUP_KEY } from "@/lib/env";
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { COOKIE, checkPw, currentUser, hashPw, ipOf, limited } from "@/lib/auth";
-import { OWNER_EMAIL, createSession, endSession, findUser, log, ownerHasPassword, setOwnerPassword } from "@/lib/db";
+import { OWNER_EMAIL, createSession, endSession, findUser, log, ownerHasPassword, setOwnerPassword, ready } from "@/lib/db";
 import { baseUrl } from "@/lib/pay";
 
 const err = (m: string, s = 400) => NextResponse.json({ error: m }, { status: s });
-export async function POST(req: Request, { params }: { params: Promise<{ action: string }> }) {
+export async function POST(req: Request, { params }: { params: Promise<{ action: string }> }) { await ready();
   const { action } = await params, jar = await cookies();
   if (action === "logout") { const t = jar.get(COOKIE)?.value; if (t) endSession(t); jar.delete(COOKIE); return NextResponse.json({ ok: true }); }
   const b = await req.json().catch(() => ({}));
@@ -24,7 +25,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ action:
   if (action === "setup") { // first run only: the owner email chooses a password
     if (ownerHasPassword()) return err("The owner account is already set up. Log in instead.", 409);
     if (limited(`setup:${ipOf(req)}`, 8, 10 * 60e3)) return err("Too many attempts. Wait ten minutes and try again.", 429);
-    const key = process.env.SETUP_KEY;
+    const key = SETUP_KEY;
     if (process.env.NODE_ENV === "production" && !key) return err("Set SETUP_KEY in the server environment before creating the owner account.", 403);
     if (key && String(b.key || "") !== key) return err("The setup key is wrong.", 403);
     if (String(b.email || "").trim().toLowerCase() !== OWNER_EMAIL()) return err("Use the owner email address.", 403);

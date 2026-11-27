@@ -1,8 +1,8 @@
 import Link from "next/link";
-import { adminStats, getSettings, listOrders, recentEvents } from "@/lib/db";
+import { adminStats, getSettings, listOrders, recentEvents, ready } from "@/lib/db";
 import { money } from "@/lib/lists";
 export const dynamic = "force-dynamic";
-export default function Overview() {
+export default async function Overview() { await ready();
   const s = adminStats(), set = getSettings(), orders = [...listOrders()].sort((a, b) => b.createdAt - a.createdAt).slice(0, 6), ev = recentEvents(12);
   const max = Math.max(1, ...s.days.map((d) => d.views)), rev = Object.entries(s.revenue);
   const gw = (["paystack", "flutterwave"] as const).some((g) => set.payments[g].enabled && set.payments[g].secretKey);

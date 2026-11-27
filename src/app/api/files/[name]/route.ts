@@ -1,8 +1,8 @@
 import path from "path";
-import { UPLOADS } from "@/lib/db";
-import { fileResponse } from "@/lib/storage";
+import { serve } from "@/lib/storage";
+import { ready } from "@/lib/db";
 
-// Public previews and hero characters. Originals that are for sale live in data/private and never pass through here.
-export async function GET(_: Request, { params }: { params: Promise<{ name: string }> }) {
-  return fileResponse(path.join(UPLOADS, path.basename((await params).name)), undefined, { "Cache-Control": "public, max-age=31536000, immutable" });
+// Public previews and hero characters. Originals that are for sale are "private:" references and never pass through here.
+export async function GET(_: Request, { params }: { params: Promise<{ name: string }> }) { await ready();
+  return serve(`/api/files/${path.basename((await params).name)}`, { cache: "public, max-age=31536000, immutable" });
 }

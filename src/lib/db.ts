@@ -2,6 +2,8 @@
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
+import { after } from "next/server";
+import { DATA_DIR, DB_URL } from "./env";
 import { CATEGORIES, LICENSES } from "./lists";
 import { dec, enc, hint } from "./secret";
 export { CATEGORIES, LICENSES };
@@ -28,7 +30,7 @@ export type Ev = { t: number; type: string; text: string };
 export type Character = { id: string; name: string; file: string; scale: number; y: number; enabled: boolean; builtin?: boolean; note?: string };
 export type Settings = {
   siteName: string; tagline: string; heroTitle: string; heroText: string; supportEmail: string; siteUrl: string; currency: string;
-  maxDownloads: number; footerNote: string; heroCharacter: string; showSwitcher: boolean; autoSwitch: boolean; switchSeconds: number; characters: Character[];
+  maxDownloads: number; footerNote: string; heroCharacter: string; showSwitcher: boolean; showTools: boolean; defaultTheme: "system" | "light" | "dark"; autoSwitch: boolean; switchSeconds: number; characters: Character[];
   legal: { terms: string; privacy: string; refunds: string };
   payments: {
     default: Gateway;
@@ -42,10 +44,7 @@ type Day = { views: number; downloads: number; orders: number };
 type DB = { users: User[]; sessions: { token: string; userId: string; expires: number }[]; assets: Asset[]; orders: Order[]; events: Ev[]; daily: Record<string, Day>; settings: Settings };
 
 export const OWNER_EMAIL = () => (process.env.OWNER_EMAIL || "jokesonyou146@gmail.com").trim().toLowerCase();
-export const DATA_DIR = path.join(process.cwd(), "data");
 const FILE = path.join(DATA_DIR, "db.json");
-export const UPLOADS = path.join(DATA_DIR, "uploads");   // public previews, hero characters
-export const PRIVATE = path.join(DATA_DIR, "private");   // originals that are for sale
 
 const SECRETS = ["payments.paystack.secretKey", "payments.paystack.webhookSecret", "payments.flutterwave.secretKey", "payments.flutterwave.secretHash", "email.resendKey"];
 const getPath = (o: any, p: string) => p.split(".").reduce((x, k) => (x == null ? x : x[k]), o);
@@ -60,7 +59,7 @@ const defaultSettings = (): Settings => ({
   siteName: "Arzzet", tagline: "3D models, HDRIs and textures",
   heroTitle: "3D you can inspect before you buy.",
   heroText: "Rotate, relight and zoom every asset in your browser. Download free files instantly, or buy the full quality file in a minute.",
-  supportEmail: "", siteUrl: "", currency: "NGN", maxDownloads: 10, footerNote: "", heroCharacter: "woman", showSwitcher: true, autoSwitch: true, switchSeconds: 9,
+  supportEmail: "", siteUrl: "", currency: "NGN", maxDownloads: 10, footerNote: "", heroCharacter: "woman", showSwitcher: true, showTools: true, defaultTheme: "system", autoSwitch: true, switchSeconds: 9,
   legal: { terms: "", privacy: "", refunds: "" },
   characters: [
     { id: "woman", name: "Michelle", file: "/characters/Michelle.glb", scale: 1, y: 0, enabled: true, builtin: true, note: "Woman" },
@@ -80,7 +79,7 @@ const mk = (slug: string, type: AssetType, title: string, file: string, category
   views: 0, downloads: 0, sales: 0, likedBy: [], featured, status: "published", price: 0, currency: "NGN", size: 0, createdAt: Date.now() - i * 1000, annotations: [],
 });
 const seed = (): DB => ({
-  users: [{ id: "system", username: "modelhub", email: "", hash: "", salt: "", role: "system", bio: "Sample content published by the platform.", createdAt: Date.now() }],
+  users: [{ id: "system", username: "arzzet", email: "", hash: "", salt: "", role: "system", bio: "Sample content published by the platform.", createdAt: Date.now() }],
   sessions: [], orders: [], events: [], daily: {}, settings: defaultSettings(),
   assets: [
     mk("damaged-helmet", "model", "Damaged Helmet", "/models/DamagedHelmet.glb", "Hard surface", "Sci-fi helmet with full PBR textures, a good test of metal and emissive maps.", ["helmet", "pbr", "scifi"], 0, true),
@@ -98,14 +97,16 @@ const seed = (): DB => ({
 });
 
 // The cache lives on globalThis so every route bundle (and dev hot reload) sees the same data.
-const G = globalThis as unknown as { __mh?: { db: DB | null; timer: NodeJS.Timeout | null } };
-const S = (G.__mh ??= { db: null, timer: null });
+type Mem = { db: DB | null; timer: NodeJS.Timeout | null; at: number; dirty: boolean; flushing: Promise<void> | null; loading: Promise<void> | null; table: boolean };
+const G = globalThis as unknown as { __mh?: Mem };
+const S = (G.__mh ??= { db: null, timer: null, at: 0, dirty: false, flushing: null, loading: null, table: false });
 
 function migrate(db: any): DB {
   db.users ||= []; db.sessions ||= []; db.assets ||= []; db.orders ||= []; db.events ||= []; db.daily ||= {};
   db.settings = merge(defaultSettings(), db.settings || {});
   if (db.settings.siteName === "ModelHub") db.settings.siteName = "Arzzet";
   delete db.comments;
+  for (const u of db.users as User[]) if (u.id === "system") u.username = "arzzet";
   const owner = OWNER_EMAIL();
   // Public accounts are closed: only the owner email keeps a usable account.
   for (const u of db.users as User[]) if (u.role !== "system") u.role = u.email && u.email.toLowerCase() === owner ? "admin" : "user";
@@ -117,17 +118,39 @@ function migrate(db: any): DB {
   }
   return db as DB;
 }
+// With a database address (Neon) the data lives in Postgres: call `await ready()` at the start of every page and handler, then use the functions below as usual.
+// Without one, it lives in data/db.json and ready() does nothing.
 function load(): DB {
   if (S.db) return S.db;
+  if (DB_URL) throw new Error("The database is not loaded yet. Call await ready() first.");
   try { S.db = migrate(JSON.parse(fs.readFileSync(FILE, "utf8"))); } catch { S.db = migrate(seed()); }
   save(); return S.db!;
 }
-function save() {
-  if (S.timer) { clearTimeout(S.timer); S.timer = null; }
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  const tmp = FILE + ".tmp"; fs.writeFileSync(tmp, JSON.stringify(S.db, null, 2)); fs.renameSync(tmp, FILE);
+let sqlP: Promise<(s: TemplateStringsArray, ...v: unknown[]) => Promise<Record<string, unknown>[]>> | null = null;
+const sql = () => (sqlP ??= import("@neondatabase/serverless").then((m) => { if (process.env.NEON_FETCH_ENDPOINT) m.neonConfig.fetchEndpoint = process.env.NEON_FETCH_ENDPOINT; /* for a local test proxy */ return m.neon(DB_URL) as never; }));
+async function pull() {
+  const q = await sql();
+  if (!S.table) { await q`create table if not exists arzzet_kv (id text primary key, doc jsonb not null, updated_at timestamptz not null default now())`; S.table = true; }
+  const rows = await q`select doc from arzzet_kv where id = 'state'`;
+  if (rows.length) S.db = migrate(rows[0].doc); else { S.db = migrate(seed()); S.dirty = true; await flush(); }
+  S.at = Date.now();
 }
-const saveSoon = () => { if (!S.timer) S.timer = setTimeout(() => { S.timer = null; save(); }, 400); };
+export async function ready() {
+  if (!DB_URL) return;
+  if (S.flushing) await S.flushing;
+  if (S.dirty || (S.db && Date.now() - S.at < 2500)) return; // just loaded, or has changes not yet written
+  await (S.loading ??= pull().finally(() => { S.loading = null; }));
+}
+function flush(): Promise<void> {
+  const run = async () => { if (!S.dirty) return; S.dirty = false; try { const q = await sql(); await q`insert into arzzet_kv (id, doc) values ('state', ${JSON.stringify(S.db)}::jsonb) on conflict (id) do update set doc = excluded.doc, updated_at = now()`; } catch (e) { S.dirty = true; console.error("Arzzet: could not save to the database", e); } };
+  return (S.flushing = (S.flushing ?? Promise.resolve()).then(run).finally(() => { if (!S.dirty) S.flushing = null; }));
+}
+function save() {
+  if (DB_URL) { S.dirty = true; try { after(() => flush()); } catch { void flush(); } return; }  // after(): finish the write once the response is sent
+  if (S.timer) { clearTimeout(S.timer); S.timer = null; }
+  try { fs.mkdirSync(DATA_DIR, { recursive: true }); const tmp = FILE + ".tmp"; fs.writeFileSync(tmp, JSON.stringify(S.db, null, 2)); fs.renameSync(tmp, FILE); } catch (e) { console.error("Arzzet: could not write data/db.json", e); }
+}
+const saveSoon = () => { if (DB_URL) return save(); if (!S.timer) S.timer = setTimeout(() => { S.timer = null; save(); }, 400); };
 const uid = () => crypto.randomBytes(6).toString("hex");
 const today = () => new Date().toISOString().slice(0, 10);
 function daily(k: keyof Day) { const db = load(); const d = (db.daily[today()] ??= { views: 0, downloads: 0, orders: 0 }); d[k]++; }
@@ -158,7 +181,7 @@ const decrypted = (s: Settings): Settings => { const c = JSON.parse(JSON.stringi
 export const getSettings = () => decrypted(load().settings);
 export function publicSettings() {
   const s = getSettings();
-  return { legal: s.legal, siteUrl: s.siteUrl, siteName: s.siteName, tagline: s.tagline, heroTitle: s.heroTitle, heroText: s.heroText, supportEmail: s.supportEmail, currency: s.currency, footerNote: s.footerNote, heroCharacter: s.heroCharacter, showSwitcher: s.showSwitcher, autoSwitch: s.autoSwitch, switchSeconds: s.switchSeconds, characters: s.characters.filter((c) => c.enabled),
+  return { legal: s.legal, siteUrl: s.siteUrl, siteName: s.siteName, tagline: s.tagline, heroTitle: s.heroTitle, heroText: s.heroText, supportEmail: s.supportEmail, currency: s.currency, footerNote: s.footerNote, heroCharacter: s.heroCharacter, showSwitcher: s.showSwitcher, showTools: s.showTools, defaultTheme: s.defaultTheme, autoSwitch: s.autoSwitch, switchSeconds: s.switchSeconds, characters: s.characters.filter((c) => c.enabled),
     gateways: (["paystack", "flutterwave"] as Gateway[]).filter((g) => s.payments[g].enabled && !!s.payments[g].secretKey), defaultGateway: s.payments.default };
 }
 export function adminSettings() {
@@ -180,7 +203,7 @@ export function updateSettings(patch: any) {
 // assets
 const pub = (a: Asset, viewer?: string): PublicAsset => {
   const { likedBy, file: _f, ownerId, ...rest } = a;
-  return { ...rest, likes: likedBy.length, liked: !!viewer && likedBy.includes(viewer), owner: findUser(ownerId)?.username ?? "modelhub", free: a.price <= 0 };
+  return { ...rest, likes: likedBy.length, liked: !!viewer && likedBy.includes(viewer), owner: findUser(ownerId)?.username ?? "arzzet", free: a.price <= 0 };
 };
 export const listAssets = (viewer?: string, drafts = false) => load().assets.filter((a) => drafts || a.status === "published").map((a) => pub(a, viewer)).sort((a, b) => b.createdAt - a.createdAt);
 export const getAsset = (k: string) => load().assets.find((a) => a.id === k || a.slug === k);
@@ -193,13 +216,9 @@ export function createAsset(d: NewAsset) {
   db.assets.unshift(a); save(); return a;
 }
 export function updateAsset(id: string, p: Partial<Pick<Asset, "title" | "category" | "license" | "tags" | "blurb" | "featured" | "status" | "price" | "currency" | "preview" | "protectedPreview">>) { const a = getAsset(id); if (!a) return null; Object.assign(a, p); save(); return a; }
-const rmFile = (ref: string) => {
-  if (ref.startsWith("private:")) fs.rmSync(path.join(PRIVATE, path.basename(ref.slice(8))), { force: true });
-  else if (ref.startsWith("/api/files/")) fs.rmSync(path.join(UPLOADS, path.basename(ref)), { force: true });
-};
 export function deleteAsset(id: string) {
   const db = load(); const a = getAsset(id); if (!a) return null;
-  db.assets = db.assets.filter((x) => x !== a); rmFile(a.file); if (a.preview !== a.file) rmFile(a.preview);
+  db.assets = db.assets.filter((x) => x !== a);
   save(); return a;
 }
 export function toggleLike(id: string, viewer: string) {

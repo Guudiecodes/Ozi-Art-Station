@@ -3,13 +3,16 @@
 import crypto from "crypto";
 import fs from "fs";
 import path from "path";
+import { APP_SECRET, DATA_DIR, DB_URL, ON_VERCEL } from "./env";
 
-const DIR = path.join(process.cwd(), "data");
+const DIR = DATA_DIR;
 let key: Buffer | null = null;
 function getKey() {
   if (key) return key;
-  const env = process.env.APP_SECRET;
+  const env = APP_SECRET;
   if (env) return (key = crypto.createHash("sha256").update(env).digest());
+  // Without APP_SECRET on Vercel there is no disk to keep a key on, so derive a stable one from the database address.
+  if (ON_VERCEL && DB_URL) return (key = crypto.createHash("sha256").update("arzzet:" + DB_URL).digest());
   const f = path.join(DIR, ".secret");
   try { key = Buffer.from(fs.readFileSync(f, "utf8").trim(), "hex"); } catch {
     fs.mkdirSync(DIR, { recursive: true });

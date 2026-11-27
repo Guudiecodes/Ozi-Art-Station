@@ -1,10 +1,10 @@
 import { NextResponse } from "next/server";
-import { getSettings, orderByRef } from "@/lib/db";
+import { getSettings, orderByRef, ready } from "@/lib/db";
 import { baseUrl, settle } from "@/lib/pay";
 
 // Gateways call this when a payment completes, even if the customer closed the tab.
 // The body is only used to find the order. Payment status always comes from asking the gateway (verify).
-export async function POST(req: Request, { params }: { params: Promise<{ gateway: string }> }) {
+export async function POST(req: Request, { params }: { params: Promise<{ gateway: string }> }) { await ready();
   const { gateway } = await params, s = getSettings();
   const body = await req.json().catch(() => ({}));
   if (gateway === "flutterwave") {
